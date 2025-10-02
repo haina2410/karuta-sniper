@@ -31,6 +31,8 @@ class MyClient(discord.Client):
         if message.author.id != KARUTA_ID:
             return
 
+        print("Message from Karuta:", message.content[:50])  # Print first 50 chars
+
         # Check if we've reacted recently (2 minutes cooldown)
         current_time = time()
         if (
