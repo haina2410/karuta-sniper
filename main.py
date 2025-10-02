@@ -61,15 +61,16 @@ class MyClient(discord.Client):
 
         logger.info(f"Message from Karuta: {message.content[:50]}")
 
-        # Check if we've reacted recently (2 minutes cooldown)
-        current_time = time()
-        if (
-            self.last_react_time > 0 and current_time - self.last_react_time < 60 * 2
-        ):  # 2 minutes
-            logger.info("Cooldown active, skipping reaction")
-            return
-
         if "dropping 3 cards" in message.content:
+            # Check if we've reacted recently (2 minutes cooldown)
+            current_time = time()
+            if (
+                self.last_react_time > 0
+                and current_time - self.last_react_time < 60 * 2
+            ):  # 2 minutes
+                logger.info("Cooldown active, skipping reaction")
+                return
+
             # wait 1.5 to 3 seconds before reacting
             await asyncio.sleep(random.uniform(1.5, 3))
 
