@@ -4,13 +4,27 @@ import discord
 from dotenv import load_dotenv
 import os
 import asyncio
+import logging
 from utils import auto_message_task, handle_reaction
 
 load_dotenv()
 
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()],
+)
+logger = logging.getLogger(__name__)
+
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = 1119245745212624926  # Use env var with fallback
 KARUTA_ID = 646937666251915264
+
+# Reconnection configuration
+MAX_RECONNECT_ATTEMPTS = 10
+BASE_RECONNECT_DELAY = 5  # seconds
+MAX_RECONNECT_DELAY = 300  # 5 minutes max
 
 if not TOKEN:
     raise Exception("No token found in environment variables")
@@ -20,24 +34,39 @@ class MyClient(discord.Client):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.last_react_time = 0
+        self.reconnect_attempts = 0
+        self.auto_task_started = False
 
     async def on_ready(self):
-        print("Logged on as", self.user)
-        # Start the auto message task
-        asyncio.create_task(auto_message_task(self, CHANNEL_ID))
+        logger.info(f"Logged on as {self.user}")
+        self.reconnect_attempts = 0  # Reset on successful connection
+
+        # Only start the auto message task once
+        if not self.auto_task_started:
+            asyncio.create_task(auto_message_task(self, CHANNEL_ID))
+            self.auto_task_started = True
+            logger.info("Auto message task started")
+
+    async def on_disconnect(self):
+        logger.warning("Bot disconnected from Discord")
+
+    async def on_resumed(self):
+        logger.info("Bot connection resumed")
+        self.reconnect_attempts = 0
 
     async def on_message(self, message):
         # only respond to Karuta
         if message.author.id != KARUTA_ID:
             return
 
-        print("Message from Karuta:", message.content[:50])  # Print first 50 chars
+        logger.info(f"Message from Karuta: {message.content[:50]}")
 
         # Check if we've reacted recently (2 minutes cooldown)
         current_time = time()
         if (
             self.last_react_time > 0 and current_time - self.last_react_time < 60 * 2
         ):  # 2 minutes
+            logger.info("Cooldown active, skipping reaction")
             return
 
         if "dropping 3 cards" in message.content:
@@ -47,14 +76,63 @@ class MyClient(discord.Client):
             reaction_time = await handle_reaction(message)
             if reaction_time:  # Only update if reaction was successful
                 self.last_react_time = reaction_time
+                logger.info("Successfully reacted to card drop")
 
                 await asyncio.sleep(random.uniform(1.5, 3))
                 channel = self.get_channel(CHANNEL_ID)
                 if channel:
                     await channel.send("kt a")
+                    logger.info("Sent 'kt a' command")
                 else:
-                    print(f"Channel with ID {CHANNEL_ID} not found")
+                    logger.error(f"Channel with ID {CHANNEL_ID} not found")
 
 
-client = MyClient()
-client.run(TOKEN)
+async def run_with_reconnect():
+    """Run bot with automatic reconnection logic"""
+    client = MyClient()
+    reconnect_attempts = 0
+
+    while True:
+        try:
+            logger.info("Starting bot...")
+            await client.start(TOKEN)
+        except discord.ConnectionClosed:
+            logger.warning("Connection closed by Discord")
+        except discord.LoginFailure:
+            logger.error("Invalid token - cannot reconnect")
+            break
+        except Exception as e:
+            logger.error(f"Unexpected error: {e}")
+
+        # Check if we should attempt reconnection
+        if reconnect_attempts >= MAX_RECONNECT_ATTEMPTS:
+            logger.error(
+                f"Max reconnection attempts ({MAX_RECONNECT_ATTEMPTS}) reached. Giving up."
+            )
+            break
+
+        reconnect_attempts += 1
+
+        # Calculate exponential backoff delay
+        delay = min(
+            BASE_RECONNECT_DELAY * (2 ** (reconnect_attempts - 1)), MAX_RECONNECT_DELAY
+        )
+
+        logger.info(
+            f"Reconnection attempt {reconnect_attempts}/{MAX_RECONNECT_ATTEMPTS} in {delay} seconds..."
+        )
+        await asyncio.sleep(delay)
+
+        # Reset the client for reconnection
+        if not client.is_closed():
+            await client.close()
+        client = MyClient()
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(run_with_reconnect())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
