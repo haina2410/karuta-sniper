@@ -41,14 +41,14 @@ class MyClient(discord.Client):
             return
 
         if "dropping 3 cards" in message.content:
-            # wait 0.9 to 2 seconds before reacting
-            await asyncio.sleep(random.uniform(0.9, 2))
+            # wait 1.5 to 3 seconds before reacting
+            await asyncio.sleep(random.uniform(1.5, 3))
 
             reaction_time = await handle_reaction(message)
             if reaction_time:  # Only update if reaction was successful
                 self.last_react_time = reaction_time
 
-                await asyncio.sleep(random.uniform(0.9, 2))
+                await asyncio.sleep(random.uniform(1.5, 3))
                 channel = self.get_channel(CHANNEL_ID)
                 if channel:
                     await channel.send("kt a")
