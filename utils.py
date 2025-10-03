@@ -17,7 +17,7 @@ async def auto_message_task(client, channel_id):
     try:
         channel = client.get_channel(channel_id)
         if channel:
-            await channel.send("kd")
+            await channel.send(f"kd <@{411465198713700353}>")
             logger.info(
                 f"Auto message 'kd' sent to {channel.name} at {strftime('%Y-%m-%d %H:%M:%S', localtime(time()))}"
             )

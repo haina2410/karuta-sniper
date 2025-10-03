@@ -56,30 +56,43 @@ class MyClient(discord.Client):
 
     async def on_message(self, message):
         # only respond to Karuta
-        if message.author.id != KARUTA_ID:
+        if message.author.id != KARUTA_ID or message.channel.id != CHANNEL_ID:
             return
 
         logger.info(f"Message from Karuta: {message.content[:50]}")
 
+        if message.content.startswith("na"):
+            # remove na and replicate the rest
+            content = message.content[2:].strip()
+            await message.channel.send(content)
+            logger.info("Replicated message after 'na': " + content)
+            return
+
+
         if "dropping 3 cards" in message.content:
-            # Check if we've reacted recently (2 minutes cooldown)
+            # Check if we've reacted recently (10 minutes cooldown)
             current_time = time()
             if (
                 self.last_react_time > 0
-                and current_time - self.last_react_time < 60 * 2
+                and current_time - self.last_react_time < 60 * 10
             ):  # 2 minutes
                 logger.info("Cooldown active, skipping reaction")
                 return
+            
+            await asyncio.sleep(random.uniform(4, 8))  # Short delay before reacting
+            
+            # React clock to the message
+            asyncio.create_task(message.add_reaction("🕒"))
 
-            # wait 1.5 to 3 seconds before reacting
-            await asyncio.sleep(random.uniform(1.5, 3))
+            # wait 30 to 50 seconds before taking card
+            await asyncio.sleep(random.uniform(30, 50))
 
             reaction_time = await handle_reaction(message)
             if reaction_time:  # Only update if reaction was successful
                 self.last_react_time = reaction_time
                 logger.info("Successfully reacted to card drop")
 
-                await asyncio.sleep(random.uniform(1.5, 3))
+                await asyncio.sleep(random.uniform(4, 8))
                 channel = self.get_channel(CHANNEL_ID)
                 if channel:
                     await channel.send("kt a")
