@@ -50,9 +50,22 @@ REACTIONS = ["1️⃣", "2️⃣", "3️⃣"]
 
 async def handle_reaction(message):
     """Handle reactions to messages"""
-    # Example: Add a reaction to the message
+
+    message = await message.channel.fetch_message(message.id)  # Refresh message to get latest reactions
+
+    reaction_counts = {}
+    for reaction in message.reactions:
+        if reaction.emoji in REACTIONS:
+            reaction_counts[reaction.emoji] = reaction.count
+
+    # Remove any emoji from REACTIONS if it already has 2 or more reactions
+    available_reactions = [emoji for emoji in REACTIONS if reaction_counts.get(emoji, 0) < 2]
+    if not available_reactions:
+        logger.info("All REACTIONS have 2 or more reactions already.")
+        return None
+
     try:
-        await message.add_reaction(random.choice(REACTIONS))
+        await message.add_reaction(random.choice(available_reactions))
         return time()  # Return current timestamp on success
     except Exception as e:
         logger.error(f"Error adding reaction: {e}")
