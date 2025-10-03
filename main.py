@@ -36,6 +36,7 @@ class MyClient(discord.Client):
         self.last_react_time = 0
         self.reconnect_attempts = 0
         self.auto_task_started = False
+        self.is_waiting_for_reaction = False
 
     async def on_ready(self):
         logger.info(f"Logged on as {self.user}")
@@ -66,11 +67,13 @@ class MyClient(discord.Client):
             logger.info("Replicated message after 'na': " + content)
             return
 
+        # Lock to prevent overlapping reactions
+        if self.is_waiting_for_reaction:
+            return
+
         # Only respond to messages from Karuta bot
         if message.author.id != KARUTA_ID:
             return
-
-        logger.info(f"Message from Karuta: {message.content[:50]}")
 
         if "dropping 3 cards" in message.content:
             # Check if we've reacted recently (10 minutes cooldown)
@@ -81,7 +84,9 @@ class MyClient(discord.Client):
             ):
                 logger.info("Cooldown active, skipping reaction")
                 return
-            
+
+            self.is_waiting_for_reaction = True
+
             await asyncio.sleep(random.uniform(4, 8))  # Short delay before reacting
             
             # React clock to the message
@@ -102,6 +107,8 @@ class MyClient(discord.Client):
                     logger.info("Sent 'kt a' command")
                 else:
                     logger.error(f"Channel with ID {CHANNEL_ID} not found")
+
+            self.is_waiting_for_reaction = False
 
 
 async def run_with_reconnect():
