@@ -13,19 +13,6 @@ async def auto_message_task(client, channel_id):
     """Background task that sends 'kd' message every 30 minutes"""
     await client.wait_until_ready()
 
-    # Send first message immediately
-    try:
-        channel = client.get_channel(channel_id)
-        if channel:
-            await channel.send(f"kd <@{411465198713700353}>")
-            logger.info(
-                f"Auto message 'kd' sent to {channel.name} at {strftime('%Y-%m-%d %H:%M:%S', localtime(time()))}"
-            )
-        else:
-            logger.error(f"Channel with ID {channel_id} not found")
-    except Exception as e:
-        logger.error(f"Error sending initial auto message: {e}")
-
     while not client.is_closed():
         sleep_time = random.randint(MIN_SLEEP_INTERVAL, MAX_SLEEP_INTERVAL)
         logger.info(
@@ -35,7 +22,7 @@ async def auto_message_task(client, channel_id):
         try:
             channel = client.get_channel(channel_id)
             if channel:
-                await channel.send("kd")
+                await channel.send(f"kd <@{411465198713700353}>")
                 logger.info(
                     f"Auto message 'kd' sent to {channel.name} at {strftime('%Y-%m-%d %H:%M:%S', localtime(time()))}"
                 )
