@@ -55,11 +55,9 @@ class MyClient(discord.Client):
         self.reconnect_attempts = 0
 
     async def on_message(self, message):
-        # only respond to Karuta
-        if message.author.id != KARUTA_ID or message.channel.id != CHANNEL_ID:
+        # only respond to channel
+        if message.channel.id != CHANNEL_ID:
             return
-
-        logger.info(f"Message from Karuta: {message.content[:50]}")
 
         if message.content.startswith("na"):
             # remove na and replicate the rest
@@ -68,6 +66,11 @@ class MyClient(discord.Client):
             logger.info("Replicated message after 'na': " + content)
             return
 
+        # Only respond to messages from Karuta bot
+        if message.author.id != KARUTA_ID:
+            return
+
+        logger.info(f"Message from Karuta: {message.content[:50]}")
 
         if "dropping 3 cards" in message.content:
             # Check if we've reacted recently (10 minutes cooldown)
@@ -75,7 +78,7 @@ class MyClient(discord.Client):
             if (
                 self.last_react_time > 0
                 and current_time - self.last_react_time < 60 * 10
-            ):  # 2 minutes
+            ):
                 logger.info("Cooldown active, skipping reaction")
                 return
             
@@ -84,8 +87,8 @@ class MyClient(discord.Client):
             # React clock to the message
             asyncio.create_task(message.add_reaction("🕒"))
 
-            # wait 30 to 50 seconds before taking card
-            await asyncio.sleep(random.uniform(30, 50))
+            # wait 40 to 50 seconds before taking card
+            await asyncio.sleep(random.uniform(40, 50))
 
             reaction_time = await handle_reaction(message)
             if reaction_time:  # Only update if reaction was successful
