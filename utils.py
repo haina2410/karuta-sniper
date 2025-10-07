@@ -55,7 +55,9 @@ async def handle_reaction(message: discord.Message) -> Optional[float]:
             reaction_counts[reaction.emoji] = reaction.count
 
     # Deterministic selection: first available
-    chosen = next((emoji for emoji in REACTIONS if reaction_counts.get(emoji, 0) < 2), None)
+    chosen = next(
+        (emoji for emoji in REACTIONS if reaction_counts.get(emoji, 0) < 2), None
+    )
     if not chosen:
         logger.info("All target reactions already at limit (>=2).")
         return None
