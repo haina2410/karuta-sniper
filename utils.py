@@ -2,6 +2,8 @@ import asyncio
 import random
 import logging
 from time import time, strftime, localtime
+from typing import Optional
+import discord
 
 logger = logging.getLogger(__name__)
 
@@ -35,25 +37,38 @@ async def auto_message_task(client, channel_id):
 REACTIONS = ["1️⃣", "2️⃣", "3️⃣"]
 
 
-async def handle_reaction(message):
-    """Handle reactions to messages"""
+async def handle_reaction(message: discord.Message) -> Optional[float]:
+    """Attempt to add one of the numeric reactions if its current count < 2.
 
-    message = await message.channel.fetch_message(message.id)  # Refresh message to get latest reactions
+    Returns timestamp (float) if a reaction was successfully added, else None.
+    """
+    try:
+        # Refetch to mitigate stale reaction snapshot after long sleeps
+        message = await message.channel.fetch_message(message.id)
+    except Exception as e:
+        logger.error(f"Failed to refetch message before reacting: {e}")
+        return None
 
-    reaction_counts = {}
+    reaction_counts: dict[str, int] = {}
     for reaction in message.reactions:
         if reaction.emoji in REACTIONS:
             reaction_counts[reaction.emoji] = reaction.count
 
-    # Remove any emoji from REACTIONS if it already has 2 or more reactions
-    available_reactions = [emoji for emoji in REACTIONS if reaction_counts.get(emoji, 0) < 2]
-    if not available_reactions:
-        logger.info("All REACTIONS have 2 or more reactions already.")
+    # Deterministic selection: first available
+    chosen = next((emoji for emoji in REACTIONS if reaction_counts.get(emoji, 0) < 2), None)
+    if not chosen:
+        logger.info("All target reactions already at limit (>=2).")
         return None
 
     try:
-        await message.add_reaction(random.choice(available_reactions))
-        return time()  # Return current timestamp on success
+        await message.add_reaction(chosen)
+        return time()
+    except discord.Forbidden:
+        logger.error("Forbidden: missing permission to add reactions.")
+    except discord.NotFound:
+        logger.error("Message not found when adding reaction.")
+    except discord.HTTPException as e:
+        logger.error(f"HTTP error adding reaction: {e}")
     except Exception as e:
-        logger.error(f"Error adding reaction: {e}")
-        return None  # Return None on error
+        logger.error(f"Unexpected error adding reaction: {e}")
+    return None
