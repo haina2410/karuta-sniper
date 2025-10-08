@@ -2,7 +2,7 @@
 
 This module is an adaptation of logic found in `ref.py`, refactored to be:
  - Non-blocking (uses aiohttp for network I/O)
- - Defensive against missing optional dependencies (OpenCV / Tesseract)
+ - Defensive against missing optional dependencies (OpenCV / EasyOCR)
  - Easier to test in isolation (pure function style where possible)
 
 Public functions:
@@ -34,12 +34,15 @@ logger = logging.getLogger(__name__)
 try:  # Lazy availability flags
     import cv2  # type: ignore
     import numpy as np  # type: ignore
-    import pytesseract  # type: ignore
+    import easyocr  # type: ignore
 
     _OCR_AVAILABLE = True
 except Exception as e:  # pragma: no cover - best effort
     _OCR_AVAILABLE = False
     _IMPORT_ERROR = e
+
+# Global EasyOCR reader instance (lazy initialized)
+_READER = None
 
 try:
     import aiohttp
@@ -68,9 +71,17 @@ PRINT_BOTTOM_PADDING_RATIO = 26.0 / REFERENCE_CARD_HEIGHT
 def _ensure_ocr_available():
     if not _OCR_AVAILABLE:
         raise RuntimeError(
-            "OCR dependencies not installed: requires opencv-python-headless, numpy, pytesseract. "
+            "OCR dependencies not installed: requires opencv-python-headless, numpy, easyocr. "
             f"Original import error: {_IMPORT_ERROR}"
         )
+
+
+def _get_reader():
+    """Get or initialize the EasyOCR reader instance."""
+    global _READER
+    if _READER is None:
+        _READER = easyocr.Reader(['en'], gpu=False)
+    return _READER
 
 
 async def fetch_image(url: str) -> bytes:
@@ -185,7 +196,9 @@ def extract_card(card_image: "np.ndarray", index: int) -> Dict[str, Any]:
         clean_name = ""
     else:
         name_roi = card_image[name_y:name_y_end, 0:name_width]
-        raw_name = pytesseract.image_to_string(name_roi, lang="eng", config="--psm 6")
+        reader = _get_reader()
+        result = reader.readtext(name_roi, detail=0)
+        raw_name = " ".join(result) if result else ""
         clean_name = _clean_ocr_text(raw_name)
 
     if name_width <= 0 or series_y >= series_y_end:
@@ -193,9 +206,9 @@ def extract_card(card_image: "np.ndarray", index: int) -> Dict[str, Any]:
         clean_series = ""
     else:
         series_roi = card_image[series_y:series_y_end, 0:name_width]
-        raw_series = pytesseract.image_to_string(
-            series_roi, lang="eng", config="--psm 6"
-        )
+        reader = _get_reader()
+        result = reader.readtext(series_roi, detail=0)
+        raw_series = " ".join(result) if result else ""
         clean_series = _clean_ocr_text(raw_series)
 
     return {
@@ -224,8 +237,6 @@ def extract_print_edition(card_image: "np.ndarray", index: int) -> Dict[str, Any
     if bottom_candidate + roi_height <= height:
         candidate_y.append(bottom_candidate)
 
-    logger.info(f"Card {index} OCR candidates: {candidate_y}")
-
     raw_capture = None
     found = None
     roi_x_start = max(width - roi_width, 0)
@@ -233,20 +244,20 @@ def extract_print_edition(card_image: "np.ndarray", index: int) -> Dict[str, Any
         roi = card_image[y : y + roi_height, roi_x_start:width]
         if roi.size == 0:
             continue
-        txt = pytesseract.image_to_string(
+        reader = _get_reader()
+        result = reader.readtext(
             roi,
-            lang="eng",
-            config="--psm 6 -c tessedit_char_whitelist=0123456789·.:•-",
+            detail=0,
+            min_size=1,
+            allowlist='0123456789·.:•-'
         )
+        txt = " ".join(result) if result else ""
+        logger.info(f"Card {index} OCR candidate at y={y}: '{txt}'")
         raw_capture = txt.strip()
         cleaned = raw_capture.replace("\n", " ")
         cleaned = cleaned.replace(":", "·").replace("-", "·").replace("•", "·")
         cleaned = re.sub(r"\s+", "", cleaned)
-        m = re.match(r"(\d{2,})[·.](\d{1,3})", cleaned)
-        if not m:
-            m2 = re.match(r"(\d{2,})(\d{1,3})", cleaned)
-            if m2:
-                m = m2
+        m = re.match(r"(\d{2,})(?:[·.](\d))?", cleaned)
         if m:
             try:
                 pn = int(m.group(1))

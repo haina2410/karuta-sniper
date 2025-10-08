@@ -243,7 +243,7 @@ class MyClient(discord.Client):
 
             try:
                 # Short random delay before initial clock reaction
-                await asyncio.sleep(random.uniform(2, 3))
+                await asyncio.sleep(random.uniform(2.5, 3.5))
 
                 # Add clock reaction in a monitored task
                 clock_task = asyncio.create_task(message.add_reaction("🕒"))
@@ -281,8 +281,7 @@ class MyClient(discord.Client):
                             emoji_map = ["1️⃣", "2️⃣", "3️⃣"]
                             if 0 <= idx < len(emoji_map):
                                 chosen_emoji = emoji_map[idx]
-                                m = f"Rarity selection: chose index {idx + 1} with print {target['print_number']} edition {target['edition']} (precomputed during wait)"
-                                logger.info(m)
+                                m = f"Chọn lá {idx + 1} với bản in `{target['print_number']}`, edition `{target['edition']}`"
                                 asyncio.create_task(message.channel.send(m))
                         else:
                             raise ValueError("No valid print numbers found")
