@@ -6,11 +6,14 @@ This module is an adaptation of logic found in `ref.py`, refactored to be:
  - Easier to test in isolation (pure function style where possible)
 
 Public functions:
+ - slice_drop_image(image: np.ndarray, card_count: int) -> list[np.ndarray]
+ - extract_card(card_image: np.ndarray, index: int) -> dict
  - extract_cards_from_drop(image_bytes: bytes, card_count: int) -> list[dict]
+ - extract_print_edition(card_image: np.ndarray, index: int) -> dict
  - extract_print_edition_from_drop(image_bytes: bytes, card_count: int) -> list[dict]
  - fetch_image(url: str) -> bytes
- - ocr_cards_from_url(url: str, card_count: int) -> list[dict]
- - ocr_prints_from_url(url: str, card_count: int) -> list[dict]
+ - ocr_cards(image_bytes: bytes, card_count: int) -> list[dict]
+ - ocr_prints(image_bytes: bytes, card_count: int) -> list[dict]
 
 Each returned card dict includes:
  {"index": int, "name": str, "series": str, "raw_name": str, "raw_series": str}
@@ -18,12 +21,13 @@ Each returned card dict includes:
 If OCR dependencies are unavailable, a RuntimeError is raised with a helpful
 message so the caller can surface it to the user.
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
 import re
-from typing import List, Dict
+from typing import List, Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +35,7 @@ try:  # Lazy availability flags
     import cv2  # type: ignore
     import numpy as np  # type: ignore
     import pytesseract  # type: ignore
+
     _OCR_AVAILABLE = True
 except Exception as e:  # pragma: no cover - best effort
     _OCR_AVAILABLE = False
@@ -41,12 +46,23 @@ try:
 except ImportError:  # pragma: no cover
     aiohttp = None  # type: ignore
 
-NAME_Y = 55
-SERIES_Y = 307
-ROW_HEIGHT = 53
-NAME_WIDTH = 180
-NAME_X_START = 46
-CARD_X_STEP = 277
+REFERENCE_IMAGE_WIDTH = 836.0
+REFERENCE_CARD_WIDTH = 277.0
+REFERENCE_CARD_HEIGHT = 419.0
+
+CARD_START_X_RATIO = 46.0 / REFERENCE_IMAGE_WIDTH
+CARD_X_STEP_RATIO = 277.0 / REFERENCE_IMAGE_WIDTH
+CARD_WIDTH_RATIO = (277.0 - 10.0) / REFERENCE_IMAGE_WIDTH  # trim borders slightly
+
+NAME_Y_RATIO = 55.0 / REFERENCE_CARD_HEIGHT
+SERIES_Y_RATIO = 307.0 / REFERENCE_CARD_HEIGHT
+ROW_HEIGHT_RATIO = 53.0 / REFERENCE_CARD_HEIGHT
+NAME_WIDTH_RATIO = 180.0 / REFERENCE_CARD_WIDTH
+
+PRINT_ROI_WIDTH_RATIO = 130.0 / REFERENCE_CARD_WIDTH
+PRINT_ROI_HEIGHT_RATIO = 42.0 / REFERENCE_CARD_HEIGHT
+PRINT_BOTTOM_PADDING_RATIO = 26.0 / REFERENCE_CARD_HEIGHT
+PRINT_Y_RATIOS = (0.58, 0.62, 0.66, 0.70, 0.74)
 
 
 def _ensure_ocr_available():
@@ -72,13 +88,54 @@ async def fetch_image(url: str) -> bytes:
                 return await resp.read()
     # Fallback (blocking) path
     import urllib.request
+
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        None, lambda: urllib.request.urlopen(url).read()  # type: ignore
+        None,
+        lambda: urllib.request.urlopen(url).read(),  # type: ignore
     )
 
 
-def extract_cards_from_drop(image_bytes: bytes, card_count: int) -> List[Dict[str, str]]:
+def slice_drop_image(image: "np.ndarray", card_count: int) -> List["np.ndarray"]:
+    """Split a decoded drop image into per-card slices.
+
+    The returned list contains each card column slice (full height) cropped
+    using layout ratios derived from the reference image. If the requested `card_count` exceeds
+    the available width, slicing stops at the image boundary.
+    """
+    if card_count <= 0:
+        return []
+
+    h, w = image.shape[:2]
+    slices: List["np.ndarray"] = []
+    for idx in range(card_count):
+        start_ratio = CARD_START_X_RATIO + idx * CARD_X_STEP_RATIO
+        end_ratio = start_ratio + CARD_WIDTH_RATIO
+
+        x_start = int(round(start_ratio * w))
+        if x_start >= w:
+            break
+        x_end = int(round(end_ratio * w))
+        x_end = max(x_end, x_start + 1)
+        x_end = min(x_end, w)
+        slices.append(image[:, x_start:x_end])
+
+    if len(slices) < card_count and card_count > 0:
+        # Fallback: divide width evenly when heuristic ratios fail (e.g., unexpected layouts)
+        fallback: List["np.ndarray"] = []
+        approx_width = w / card_count
+        for idx in range(card_count):
+            x_start = int(round(idx * approx_width))
+            x_end = int(round((idx + 1) * approx_width))
+            x_end = min(w, max(x_end, x_start + 1))
+            fallback.append(image[:, x_start:x_end])
+        slices = fallback
+    return slices
+
+
+def extract_cards_from_drop(
+    image_bytes: bytes, card_count: int
+) -> List[Dict[str, Any]]:
     """Extract card (series, name) pairs from a Karuta drop image.
 
     The layout assumptions mirror those from `ref.py`.
@@ -98,40 +155,12 @@ def extract_cards_from_drop(image_bytes: bytes, card_count: int) -> List[Dict[st
     # Binarize using OTSU
     _, thresh = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    names: List[str] = []
-    series: List[str] = []
+    thresh_slices = slice_drop_image(thresh, card_count)
 
-    # Iterate columns
-    for idx in range(card_count):
-        x = NAME_X_START + idx * CARD_X_STEP
+    cards: List[Dict[str, Any]] = []
+    for idx, card_slice in enumerate(thresh_slices):
+        cards.append(extract_card(card_slice, idx))
 
-        # Name row region
-        name_roi = thresh[NAME_Y : NAME_Y + ROW_HEIGHT, x : x + NAME_WIDTH]
-        raw_name = pytesseract.image_to_string(name_roi, lang="eng", config="--psm 6")
-        clean_name = _clean_ocr_text(raw_name)
-        names.append((clean_name, raw_name))
-
-        # Series row region
-        series_roi = thresh[SERIES_Y : SERIES_Y + ROW_HEIGHT, x : x + NAME_WIDTH]
-        raw_series = pytesseract.image_to_string(
-            series_roi, lang="eng", config="--psm 6"
-        )
-        clean_series = _clean_ocr_text(raw_series)
-        series.append((clean_series, raw_series))
-
-    cards: List[Dict[str, str]] = []
-    for i in range(card_count):
-        name_clean, name_raw = names[i]
-        series_clean, series_raw = series[i]
-        cards.append(
-            {
-                "index": i,
-                "name": name_clean,
-                "series": series_clean,
-                "raw_name": name_raw.strip(),
-                "raw_series": series_raw.strip(),
-            }
-        )
     return cards
 
 
@@ -143,24 +172,140 @@ def _clean_ocr_text(s: str) -> str:
     return s
 
 
-async def ocr_cards_from_url(url: str, card_count: int) -> List[Dict[str, str]]:
-    bytes_ = await fetch_image(url)
+def extract_card(card_image: "np.ndarray", index: int) -> Dict[str, Any]:
+    """Extract series/name information for a single card slice."""
+    height, width = card_image.shape[:2]
+    if height <= 0 or width <= 0:
+        return {
+            "index": index,
+            "name": "",
+            "series": "",
+            "raw_name": "",
+            "raw_series": "",
+        }
+
+    name_width = max(1, int(round(NAME_WIDTH_RATIO * width)))
+    name_y = int(round(NAME_Y_RATIO * height))
+    name_height = max(1, int(round(ROW_HEIGHT_RATIO * height)))
+    name_y_end = min(name_y + name_height, height)
+
+    series_y = int(round(SERIES_Y_RATIO * height))
+    series_height = name_height  # same config
+    series_y_end = min(series_y + series_height, height)
+
+    if name_width <= 0 or name_y >= name_y_end:
+        raw_name = ""
+        clean_name = ""
+    else:
+        name_roi = card_image[name_y:name_y_end, 0:name_width]
+        raw_name = pytesseract.image_to_string(name_roi, lang="eng", config="--psm 6")
+        clean_name = _clean_ocr_text(raw_name)
+
+    if name_width <= 0 or series_y >= series_y_end:
+        raw_series = ""
+        clean_series = ""
+    else:
+        series_roi = card_image[series_y:series_y_end, 0:name_width]
+        raw_series = pytesseract.image_to_string(
+            series_roi, lang="eng", config="--psm 6"
+        )
+        clean_series = _clean_ocr_text(raw_series)
+
+    return {
+        "index": index,
+        "name": clean_name,
+        "series": clean_series,
+        "raw_name": raw_name.strip(),
+        "raw_series": raw_series.strip(),
+    }
+
+
+def extract_print_edition(card_image: "np.ndarray", index: int) -> Dict[str, Any]:
+    """Extract print and edition metadata for a single card slice."""
+    height, width = card_image.shape[:2]
+    if height <= 0 or width <= 0:
+        return {"index": index, "print_number": None, "edition": None, "raw": ""}
+
+    candidate_y = []
+    seen = set()
+    roi_height = max(1, int(round(PRINT_ROI_HEIGHT_RATIO * height)))
+    roi_width = max(1, int(round(PRINT_ROI_WIDTH_RATIO * width)))
+    for ratio in PRINT_Y_RATIOS:
+        cy = int(round(height * ratio))
+        if cy + roi_height < height and cy not in seen:
+            candidate_y.append(cy)
+            seen.add(cy)
+
+    bottom_candidate = (
+        height - roi_height - int(round(PRINT_BOTTOM_PADDING_RATIO * height))
+    )
+    bottom_candidate = max(0, bottom_candidate)
+    if bottom_candidate not in seen and bottom_candidate + roi_height <= height:
+        candidate_y.append(bottom_candidate)
+        seen.add(bottom_candidate)
+
+    final_candidate = max(0, height - roi_height)
+    if final_candidate not in seen:
+        candidate_y.append(final_candidate)
+
+    raw_capture = None
+    found = None
+    roi_x_start = max(width - roi_width, 0)
+    for y in candidate_y:
+        roi = card_image[y : y + roi_height, roi_x_start:width]
+        if roi.size == 0:
+            continue
+        _, bin_roi = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        txt = pytesseract.image_to_string(
+            bin_roi,
+            lang="eng",
+            config="--psm 6 -c tessedit_char_whitelist=0123456789·.:•-",
+        )
+        raw_capture = txt.strip()
+        cleaned = raw_capture.replace("\n", " ")
+        cleaned = cleaned.replace(":", "·").replace("-", "·").replace("•", "·")
+        cleaned = re.sub(r"\s+", "", cleaned)
+        m = re.match(r"(\d{2,})[·.](\d{1,3})", cleaned)
+        if not m:
+            m2 = re.match(r"(\d{2,})(\d{1,3})", cleaned)
+            if m2:
+                m = m2
+        if m:
+            try:
+                pn = int(m.group(1))
+                ed = int(m.group(2)) if m.lastindex and m.lastindex >= 2 else None
+            except Exception:
+                pn, ed = None, None
+            found = (pn, ed, raw_capture)
+            break
+
+    if found:
+        pn, ed, raw = found
+        return {"index": index, "print_number": pn, "edition": ed, "raw": raw}
+
+    return {
+        "index": index,
+        "print_number": None,
+        "edition": None,
+        "raw": raw_capture or "",
+    }
+
+
+async def ocr_cards(image_bytes: bytes, card_count: int) -> List[Dict[str, Any]]:
+    """Asynchronously OCR card names/series from already-fetched image bytes.
+
+    Use this when you already have the image bytes (e.g., to run multiple OCR
+    passes without refetching)."""
     loop = asyncio.get_running_loop()
-    # Run CPU-heavy OCR in default executor to avoid event loop blockage
     return await loop.run_in_executor(
-        None, lambda: extract_cards_from_drop(bytes_, card_count)
+        None, lambda: extract_cards_from_drop(image_bytes, card_count)
     )
 
 
-def extract_print_edition_from_drop(image_bytes: bytes, card_count: int):
-    """Attempt to read bottom-right print metadata per card.
-
-    Heuristic approach: for each card we probe several candidate Y offsets
-    near the lower portion of the card to find a pattern like:
-        75846·1  or  75846-1  or  75846 1
-
-    Returns list[dict]: {index, print_number (int|None), edition (int|None), raw}
-    """
+def extract_print_edition_from_drop(
+    image_bytes: bytes, card_count: int
+) -> List[Dict[str, Any]]:
+    """Attempt to read bottom-right print metadata per card."""
     _ensure_ocr_available()
     if card_count <= 0:
         return []
@@ -170,92 +315,30 @@ def extract_print_edition_from_drop(image_bytes: bytes, card_count: int):
     if image is None:
         raise RuntimeError("Failed to decode image bytes with OpenCV")
 
-    h, w = image.shape[:2]
+    card_slices = slice_drop_image(image, card_count)
 
-    # Constants derived from earlier x-layout + experimentation guidelines
-    CARD_WIDTH_APPROX = CARD_X_STEP - 10  # some padding
-    PRINT_ROI_WIDTH = 130
-    PRINT_ROI_HEIGHT = 42
-    # Candidate Y starts (from near 60% height downward) - will clamp if beyond image
-    candidate_y = []
-    base_candidates = [int(h * r) for r in (0.58, 0.62, 0.66, 0.70, 0.74)]
-    seen = set()
-    for cy in base_candidates:
-        if cy + PRINT_ROI_HEIGHT < h and cy not in seen:
-            candidate_y.append(cy)
-            seen.add(cy)
+    results: List[Dict[str, Any]] = []
+    for idx, card_slice in enumerate(card_slices):
+        results.append(extract_print_edition(card_slice, idx))
 
-    results = []
-    for idx in range(card_count):
-        base_x = NAME_X_START + idx * CARD_X_STEP
-        card_right = min(base_x + CARD_WIDTH_APPROX, w)
-        roi_x = max(card_right - PRINT_ROI_WIDTH, base_x)
-
-        found = None
-        raw_capture = None
-        for y in candidate_y:
-            roi = image[y : y + PRINT_ROI_HEIGHT, roi_x : roi_x + PRINT_ROI_WIDTH]
-            if roi.size == 0:
-                continue
-            # Increase contrast
-            _, bin_roi = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            txt = pytesseract.image_to_string(
-                bin_roi,
-                lang="eng",
-                config="--psm 6 -c tessedit_char_whitelist=0123456789·.:•-",
-            )
-            raw_capture = txt.strip()
-            cleaned = raw_capture.replace("\n", " ")
-            cleaned = cleaned.replace(":", "·").replace("-", "·").replace("•", "·")
-            cleaned = re.sub(r"\s+", "", cleaned)
-            m = re.match(r"(\d{2,})[·.](\d{1,3})", cleaned)
-            if not m:
-                # Sometimes separator dropped; try space split
-                m2 = re.match(r"(\d{2,})(\d{1,3})", cleaned)
-                if m2:
-                    m = m2
-            if m:
-                try:
-                    pn = int(m.group(1))
-                    ed = int(m.group(2)) if m.lastindex and m.lastindex >= 2 else None
-                except Exception:
-                    pn, ed = None, None
-                found = (pn, ed, raw_capture)
-                break
-        if found:
-            pn, ed, raw = found
-            results.append(
-                {
-                    "index": idx,
-                    "print_number": pn,
-                    "edition": ed,
-                    "raw": raw,
-                }
-            )
-        else:
-            results.append(
-                {
-                    "index": idx,
-                    "print_number": None,
-                    "edition": None,
-                    "raw": raw_capture or "",
-                }
-            )
     return results
 
 
-async def ocr_prints_from_url(url: str, card_count: int):
-    bytes_ = await fetch_image(url)
+async def ocr_prints(image_bytes: bytes, card_count: int) -> List[Dict[str, Any]]:
+    """Asynchronously OCR print / edition metadata from already-fetched bytes."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        None, lambda: extract_print_edition_from_drop(bytes_, card_count)
+        None, lambda: extract_print_edition_from_drop(image_bytes, card_count)
     )
 
 
 __all__ = [
-    "ocr_cards_from_url",
+    "slice_drop_image",
+    "extract_card",
+    "ocr_cards",
     "extract_cards_from_drop",
     "fetch_image",
+    "extract_print_edition",
     "extract_print_edition_from_drop",
-    "ocr_prints_from_url",
+    "ocr_prints",
 ]

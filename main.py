@@ -9,7 +9,11 @@ from utils import auto_message_task, handle_reaction
 from datetime import datetime, timezone
 from typing import Optional
 
-from ocr_utils import ocr_cards_from_url, ocr_prints_from_url  # type: ignore
+from ocr_utils import (
+    ocr_cards,
+    ocr_prints,
+    fetch_image,
+)  # type: ignore
 
 load_dotenv()
 
@@ -70,25 +74,6 @@ class MyClient(discord.Client):
         self.reconnect_attempts = 0
 
     async def on_message(self, message):
-        # only respond to channel
-        if message.channel.id != CHANNEL_ID:
-            return
-
-        if message.content.startswith("na"):
-            # remove na and replicate the rest
-            content = message.content[2:].strip()
-
-            # Fire-and-forget the send so we don't block the event dispatch path
-            async def _echo():
-                try:
-                    await message.channel.send(content)
-                    logger.info("Replicated message after 'na': " + content)
-                except Exception:
-                    logger.exception("Failed to replicate message")
-
-            asyncio.create_task(_echo())
-            return
-
         # Test commands (developer utilities)
         if message.content.startswith("ocrinfo"):
             await message.channel.send(
@@ -112,10 +97,13 @@ class MyClient(discord.Client):
                 return
             start = time()
             try:
-                # Run name/series OCR and print OCR concurrently
-                cards_task = asyncio.create_task(ocr_cards_from_url(url, count))
-                prints_task = asyncio.create_task(ocr_prints_from_url(url, count))
-                cards, prints = await asyncio.gather(cards_task, prints_task, return_exceptions=True)
+                # Fetch image once then run card + print OCR concurrently (avoid double download)
+                image_bytes = await fetch_image(url)
+                cards_task = asyncio.create_task(ocr_cards(image_bytes, count))
+                prints_task = asyncio.create_task(ocr_prints(image_bytes, count))
+                cards, prints = await asyncio.gather(
+                    cards_task, prints_task, return_exceptions=True
+                )
 
                 self.ocr_uses += 1
                 self.last_ocr_duration = time() - start
@@ -124,10 +112,12 @@ class MyClient(discord.Client):
                 if isinstance(cards, Exception):
                     raise cards
                 if isinstance(prints, Exception):
-                    logger.warning(f"Print OCR failed (continuing without prints): {prints}")
+                    logger.warning(
+                        f"Print OCR failed (continuing without prints): {prints}"
+                    )
                     prints = []
 
-                prints_by_index = {p['index']: p for p in prints if isinstance(p, dict)}
+                prints_by_index = {p["index"]: p for p in prints if isinstance(p, dict)}
 
                 if not cards:
                     await message.channel.send("No cards parsed (empty result)")
@@ -135,18 +125,19 @@ class MyClient(discord.Client):
 
                 lines = []
                 for c in cards:
-                    p = prints_by_index.get(c['index'])
-                    if p and p.get('print_number') is not None:
+                    p = prints_by_index.get(c["index"])
+                    if p and p.get("print_number") is not None:
                         lines.append(
-                            f"#{c['index']+1}: {c['series']} - {c['name']} | print={p['print_number']} ed={p['edition']}"
+                            f"#{c['index'] + 1}: {c['series']} - {c['name']} | print={p['print_number']} ed={p['edition']}"
                         )
                     else:
                         lines.append(
-                            f"#{c['index']+1}: {c['series']} - {c['name']} | print=?"
+                            f"#{c['index'] + 1}: {c['series']} - {c['name']} | print=?"
                         )
 
                 await message.channel.send(
-                    f"Parsed {len(cards)} cards in {self.last_ocr_duration:.2f}s:\n" + "\n".join(lines)
+                    f"Parsed {len(cards)} cards in {self.last_ocr_duration:.2f}s:\n"
+                    + "\n".join(lines)
                 )
             except Exception as e:
                 self.last_ocr_duration = time() - start
@@ -166,15 +157,17 @@ class MyClient(discord.Client):
                 return
             start = time()
             try:
-                pe = await ocr_prints_from_url(url, count)
+                img_bytes = await fetch_image(url)
+                pe = await ocr_prints(img_bytes, count)
                 self.ocr_uses += 1
                 self.last_ocr_duration = time() - start
                 lines = [
-                    f"#{c['index']+1}: print={c['print_number']} edition={c['edition']} raw='{c['raw']}'"
+                    f"#{c['index'] + 1}: print={c['print_number']} edition={c['edition']} raw='{c['raw']}'"
                     for c in pe
                 ]
                 await message.channel.send(
-                    f"Parsed print data in {self.last_ocr_duration:.2f}s:\n" + "\n".join(lines)
+                    f"Parsed print data in {self.last_ocr_duration:.2f}s:\n"
+                    + "\n".join(lines)
                 )
             except Exception as e:
                 self.last_ocr_duration = time() - start
@@ -183,6 +176,25 @@ class MyClient(discord.Client):
 
         # Only respond to messages from Karuta bot
         if message.author.id != KARUTA_ID:
+            return
+
+        # only respond to channel
+        if message.channel.id != CHANNEL_ID:
+            return
+
+        if message.content.startswith("na"):
+            # remove na and replicate the rest
+            content = message.content[2:].strip()
+
+            # Fire-and-forget the send so we don't block the event dispatch path
+            async def _echo():
+                try:
+                    await message.channel.send(content)
+                    logger.info("Replicated message after 'na': " + content)
+                except Exception:
+                    logger.exception("Failed to replicate message")
+
+            asyncio.create_task(_echo())
             return
 
         # Instrument processing latency (how far behind we processed this event)
@@ -206,7 +218,9 @@ class MyClient(discord.Client):
 
             # Defer OCR start: only schedule reaction sequence (which will OCR within its wait window)
             if card_count == 3:
-                logger.info("Detected card drop message (3 cards), scheduling reaction sequence with deferred OCR")
+                logger.info(
+                    "Detected card drop message (3 cards), scheduling reaction sequence with deferred OCR"
+                )
                 asyncio.create_task(self._reaction_sequence(message))
 
     async def _reaction_sequence(self, message: discord.Message):
@@ -245,7 +259,9 @@ class MyClient(discord.Client):
                 if message.attachments:
                     try:
                         attachment = message.attachments[0]
-                        ocr_task = asyncio.create_task(ocr_prints_from_url(attachment.url, 3))
+                        # Fetch once then process in background
+                        img_bytes = await fetch_image(attachment.url)
+                        ocr_task = asyncio.create_task(ocr_prints(img_bytes, 3))
                     except Exception:
                         logger.exception("Failed to start OCR task for prints")
 
@@ -264,18 +280,22 @@ class MyClient(discord.Client):
                             emoji_map = ["1️⃣", "2️⃣", "3️⃣"]
                             if 0 <= idx < len(emoji_map):
                                 chosen_emoji = emoji_map[idx]
-                                m = f"Rarity selection: chose index {idx+1} with print {target['print_number']} edition {target['edition']} (precomputed during wait)"
+                                m = f"Rarity selection: chose index {idx + 1} with print {target['print_number']} edition {target['edition']} (precomputed during wait)"
                                 logger.info(m)
                                 asyncio.create_task(message.channel.send(m))
                     except Exception:
-                        logger.exception("Concurrent print OCR failed; falling back to default reaction heuristic")
+                        logger.exception(
+                            "Concurrent print OCR failed; falling back to default reaction heuristic"
+                        )
 
                 if chosen_emoji:
                     try:
                         await message.add_reaction(chosen_emoji)
                         reaction_time = time()
                     except Exception:
-                        logger.exception("Failed adding chosen rarity emoji; fallback to default handler")
+                        logger.exception(
+                            "Failed adding chosen rarity emoji; fallback to default handler"
+                        )
                         reaction_time = await handle_reaction(message)
                 else:
                     reaction_time = await handle_reaction(message)
@@ -312,7 +332,9 @@ class MyClient(discord.Client):
     async def _ocr_and_log_cards(self, url: str, card_count: int):
         start = time()
         try:
-            cards = await ocr_cards_from_url(url, card_count)
+            # Fetch once then OCR
+            image_bytes = await fetch_image(url)
+            cards = await ocr_cards(image_bytes, card_count)
             self.ocr_uses += 1
             self.last_ocr_duration = time() - start
             if cards:
@@ -320,7 +342,7 @@ class MyClient(discord.Client):
                     f"{c['series']} - {c['name']}" for c in cards[: min(3, len(cards))]
                 )
                 logger.info(
-                    f"OCR parsed {len(cards)} cards in {self.last_ocr_duration:.2f}s: {preview}{'...' if len(cards)>3 else ''}"
+                    f"OCR parsed {len(cards)} cards in {self.last_ocr_duration:.2f}s: {preview}{'...' if len(cards) > 3 else ''}"
                 )
             else:
                 logger.info("OCR returned empty card list")
