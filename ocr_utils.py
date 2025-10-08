@@ -43,6 +43,7 @@ except Exception as e:  # pragma: no cover - best effort
 
 try:
     import aiohttp
+    import os
 except ImportError:  # pragma: no cover
     aiohttp = None  # type: ignore
 
@@ -60,7 +61,7 @@ ROW_HEIGHT_RATIO = 53.0 / REFERENCE_CARD_HEIGHT
 NAME_WIDTH_RATIO = 180.0 / REFERENCE_CARD_WIDTH
 
 PRINT_ROI_WIDTH_RATIO = 130.0 / REFERENCE_CARD_WIDTH
-PRINT_ROI_HEIGHT_RATIO = 42.0 / REFERENCE_CARD_HEIGHT
+PRINT_ROI_HEIGHT_RATIO = 26.0 / REFERENCE_CARD_HEIGHT
 PRINT_BOTTOM_PADDING_RATIO = 26.0 / REFERENCE_CARD_HEIGHT
 PRINT_Y_RATIOS = (0.58, 0.62, 0.66, 0.70, 0.74)
 
@@ -99,37 +100,26 @@ async def fetch_image(url: str) -> bytes:
 def slice_drop_image(image: "np.ndarray", card_count: int) -> List["np.ndarray"]:
     """Split a decoded drop image into per-card slices.
 
-    The returned list contains each card column slice (full height) cropped
-    using layout ratios derived from the reference image. If the requested `card_count` exceeds
-    the available width, slicing stops at the image boundary.
+    The returned list contains each card column slice (full height) by dividing
+    the image width evenly among `card_count` slots (using floor division).
+    Any remainder pixels are included in the final slice.
     """
     if card_count <= 0:
         return []
 
-    h, w = image.shape[:2]
+    _, w = image.shape[:2]
+    slice_width = max(1, w // card_count)
+
     slices: List["np.ndarray"] = []
+    x_start = 0
     for idx in range(card_count):
-        start_ratio = CARD_START_X_RATIO + idx * CARD_X_STEP_RATIO
-        end_ratio = start_ratio + CARD_WIDTH_RATIO
-
-        x_start = int(round(start_ratio * w))
-        if x_start >= w:
-            break
-        x_end = int(round(end_ratio * w))
-        x_end = max(x_end, x_start + 1)
-        x_end = min(x_end, w)
+        x_end = x_start + slice_width
+        if idx == card_count - 1:
+            x_end = w  # include any remainder in the last slice
+        x_end = min(w, max(x_end, x_start + 1))
         slices.append(image[:, x_start:x_end])
+        x_start = x_end
 
-    if len(slices) < card_count and card_count > 0:
-        # Fallback: divide width evenly when heuristic ratios fail (e.g., unexpected layouts)
-        fallback: List["np.ndarray"] = []
-        approx_width = w / card_count
-        for idx in range(card_count):
-            x_start = int(round(idx * approx_width))
-            x_end = int(round((idx + 1) * approx_width))
-            x_end = min(w, max(x_end, x_start + 1))
-            fallback.append(image[:, x_start:x_end])
-        slices = fallback
     return slices
 
 
@@ -256,6 +246,10 @@ def extract_print_edition(card_image: "np.ndarray", index: int) -> Dict[str, Any
         if roi.size == 0:
             continue
         _, bin_roi = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # Save ROI for debugging
+        filename = f"roi_card{index}_y{y}_x{roi_x_start}.png"
+        filepath = os.path.join("./temp", filename)
+        cv2.imwrite(filepath, bin_roi)
         txt = pytesseract.image_to_string(
             bin_roi,
             lang="eng",
