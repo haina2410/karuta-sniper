@@ -7,6 +7,9 @@ import asyncio
 import logging
 from utils import auto_message_task, handle_reaction
 from datetime import datetime, timezone
+from typing import Optional
+
+from ocr_utils import ocr_cards_from_url, ocr_prints_from_url  # type: ignore
 
 load_dotenv()
 
@@ -43,6 +46,9 @@ class MyClient(discord.Client):
         self.auto_task_started = False
         # Lock to prevent overlapping reaction workflows
         self._reaction_lock = asyncio.Lock()
+        # Stats
+        self.ocr_uses = 0
+        self.last_ocr_duration: Optional[float] = None
 
     async def on_ready(self):
         logger.info(f"Logged on as {self.user}")
@@ -83,6 +89,98 @@ class MyClient(discord.Client):
             asyncio.create_task(_echo())
             return
 
+        # Test commands (developer utilities)
+        if message.content.startswith("ocrinfo"):
+            await message.channel.send(
+                f"OCR uses: {self.ocr_uses} | Last duration: {self.last_ocr_duration:.2f}s"
+                if self.last_ocr_duration is not None
+                else f"OCR uses: {self.ocr_uses} | Last duration: n/a"
+            )
+            return
+
+        if message.content.startswith("ocr "):
+            # Usage: ocr <image_url> <card_count>
+            parts = message.content.split()
+            if len(parts) < 3:
+                await message.channel.send("Usage: ocr <url> <card_count>")
+                return
+            url = parts[1]
+            try:
+                count = int(parts[2])
+            except ValueError:
+                await message.channel.send("card_count must be integer")
+                return
+            start = time()
+            try:
+                # Run name/series OCR and print OCR concurrently
+                cards_task = asyncio.create_task(ocr_cards_from_url(url, count))
+                prints_task = asyncio.create_task(ocr_prints_from_url(url, count))
+                cards, prints = await asyncio.gather(cards_task, prints_task, return_exceptions=True)
+
+                self.ocr_uses += 1
+                self.last_ocr_duration = time() - start
+
+                # Handle potential exceptions individually
+                if isinstance(cards, Exception):
+                    raise cards
+                if isinstance(prints, Exception):
+                    logger.warning(f"Print OCR failed (continuing without prints): {prints}")
+                    prints = []
+
+                prints_by_index = {p['index']: p for p in prints if isinstance(p, dict)}
+
+                if not cards:
+                    await message.channel.send("No cards parsed (empty result)")
+                    return
+
+                lines = []
+                for c in cards:
+                    p = prints_by_index.get(c['index'])
+                    if p and p.get('print_number') is not None:
+                        lines.append(
+                            f"#{c['index']+1}: {c['series']} - {c['name']} | print={p['print_number']} ed={p['edition']}"
+                        )
+                    else:
+                        lines.append(
+                            f"#{c['index']+1}: {c['series']} - {c['name']} | print=?"
+                        )
+
+                await message.channel.send(
+                    f"Parsed {len(cards)} cards in {self.last_ocr_duration:.2f}s:\n" + "\n".join(lines)
+                )
+            except Exception as e:
+                self.last_ocr_duration = time() - start
+                await message.channel.send(f"OCR failed: {e}")
+            return
+
+        if message.content.startswith("ocrprint "):
+            parts = message.content.split()
+            if len(parts) < 3:
+                await message.channel.send("Usage: ocrprint <url> <card_count>")
+                return
+            url = parts[1]
+            try:
+                count = int(parts[2])
+            except ValueError:
+                await message.channel.send("card_count must be integer")
+                return
+            start = time()
+            try:
+                pe = await ocr_prints_from_url(url, count)
+                self.ocr_uses += 1
+                self.last_ocr_duration = time() - start
+                lines = [
+                    f"#{c['index']+1}: print={c['print_number']} edition={c['edition']} raw='{c['raw']}'"
+                    for c in pe
+                ]
+                await message.channel.send(
+                    f"Parsed print data in {self.last_ocr_duration:.2f}s:\n" + "\n".join(lines)
+                )
+            except Exception as e:
+                self.last_ocr_duration = time() - start
+                await message.channel.send(f"OCR print failed: {e}")
+            return
+
         # Only respond to messages from Karuta bot
         if message.author.id != KARUTA_ID:
             return
@@ -99,13 +197,25 @@ class MyClient(discord.Client):
         except Exception:
             logger.debug("Failed to compute message processing latency", exc_info=True)
 
-        if "dropping 3 cards" in message.content:
-            logger.info("Detected card drop message, creating reaction task")
-            # Launch the reaction workflow as a task so on_message returns quickly
-            asyncio.create_task(self._reaction_sequence(message))
+        if "dropping" in message.content and "cards" in message.content:
+            # Attempt to parse number of cards
+            import re
+
+            match = re.search(r"dropping (\d+) cards", message.content)
+            card_count = int(match.group(1)) if match else 3
+
+            # Defer OCR start: only schedule reaction sequence (which will OCR within its wait window)
+            if card_count == 3:
+                logger.info("Detected card drop message (3 cards), scheduling reaction sequence with deferred OCR")
+                asyncio.create_task(self._reaction_sequence(message))
 
     async def _reaction_sequence(self, message: discord.Message):
-        """Encapsulate the delayed reaction workflow with locking and error handling."""
+        """Encapsulate the delayed reaction workflow with locking and rarity selection.
+
+        Enhancement: attempt to pick the card with the lowest print number if
+        an attachment is available and print OCR succeeds; otherwise default
+        to first-available numeric reaction logic in `handle_reaction`.
+        """
         async with self._reaction_lock:
             # Cooldown check (10 minutes)
             current_time = time()
@@ -130,10 +240,45 @@ class MyClient(discord.Client):
                     else None
                 )
 
-                # Wait before attempting number reaction
+                # Kick off OCR concurrently during the waiting window to utilize idle time.
+                ocr_task = None
+                if message.attachments:
+                    try:
+                        attachment = message.attachments[0]
+                        ocr_task = asyncio.create_task(ocr_prints_from_url(attachment.url, 3))
+                    except Exception:
+                        logger.exception("Failed to start OCR task for prints")
+
+                # Wait before attempting number reaction (window for other players to react)
                 await asyncio.sleep(random.uniform(38, 48))
 
-                reaction_time = await handle_reaction(message)
+                # Attempt rarity-based selection (lowest print number) using OCR result if available
+                chosen_emoji = None
+                if ocr_task:
+                    try:
+                        pe = await ocr_task
+                        valid = [c for c in pe if c.get("print_number") is not None]
+                        if valid:
+                            target = min(valid, key=lambda c: c["print_number"])
+                            idx = target["index"]
+                            emoji_map = ["1️⃣", "2️⃣", "3️⃣"]
+                            if 0 <= idx < len(emoji_map):
+                                chosen_emoji = emoji_map[idx]
+                                m = f"Rarity selection: chose index {idx+1} with print {target['print_number']} edition {target['edition']} (precomputed during wait)"
+                                logger.info(m)
+                                asyncio.create_task(message.channel.send(m))
+                    except Exception:
+                        logger.exception("Concurrent print OCR failed; falling back to default reaction heuristic")
+
+                if chosen_emoji:
+                    try:
+                        await message.add_reaction(chosen_emoji)
+                        reaction_time = time()
+                    except Exception:
+                        logger.exception("Failed adding chosen rarity emoji; fallback to default handler")
+                        reaction_time = await handle_reaction(message)
+                else:
+                    reaction_time = await handle_reaction(message)
                 if reaction_time:
                     self.last_react_time = reaction_time
                     logger.info("Successfully reacted to card drop")
@@ -163,6 +308,25 @@ class MyClient(discord.Client):
                     f"Event loop lag detected: {lag:.3f}s (something blocked the loop)"
                 )
             expected = now + 1.0
+
+    async def _ocr_and_log_cards(self, url: str, card_count: int):
+        start = time()
+        try:
+            cards = await ocr_cards_from_url(url, card_count)
+            self.ocr_uses += 1
+            self.last_ocr_duration = time() - start
+            if cards:
+                preview = ", ".join(
+                    f"{c['series']} - {c['name']}" for c in cards[: min(3, len(cards))]
+                )
+                logger.info(
+                    f"OCR parsed {len(cards)} cards in {self.last_ocr_duration:.2f}s: {preview}{'...' if len(cards)>3 else ''}"
+                )
+            else:
+                logger.info("OCR returned empty card list")
+        except Exception:
+            self.last_ocr_duration = time() - start
+            logger.exception("OCR failed for drop attachment")
 
 
 async def run_with_reconnect():
