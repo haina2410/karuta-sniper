@@ -174,10 +174,6 @@ class MyClient(discord.Client):
                 await message.channel.send(f"OCR print failed: {e}")
             return
 
-        # Only respond to messages from Karuta bot
-        if message.author.id != KARUTA_ID:
-            return
-
         # only respond to channel
         if message.channel.id != CHANNEL_ID:
             return
@@ -195,6 +191,11 @@ class MyClient(discord.Client):
                     logger.exception("Failed to replicate message")
 
             asyncio.create_task(_echo())
+            return
+
+
+        # Only respond to messages from Karuta bot
+        if message.author.id != KARUTA_ID:
             return
 
         # Instrument processing latency (how far behind we processed this event)
@@ -283,6 +284,8 @@ class MyClient(discord.Client):
                                 m = f"Rarity selection: chose index {idx + 1} with print {target['print_number']} edition {target['edition']} (precomputed during wait)"
                                 logger.info(m)
                                 asyncio.create_task(message.channel.send(m))
+                        else:
+                            raise ValueError("No valid print numbers found")
                     except Exception:
                         logger.exception(
                             "Concurrent print OCR failed; falling back to default reaction heuristic"

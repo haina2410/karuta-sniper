@@ -60,10 +60,9 @@ SERIES_Y_RATIO = 307.0 / REFERENCE_CARD_HEIGHT
 ROW_HEIGHT_RATIO = 53.0 / REFERENCE_CARD_HEIGHT
 NAME_WIDTH_RATIO = 180.0 / REFERENCE_CARD_WIDTH
 
-PRINT_ROI_WIDTH_RATIO = 130.0 / REFERENCE_CARD_WIDTH
+PRINT_ROI_WIDTH_RATIO = 189.0 / REFERENCE_CARD_WIDTH
 PRINT_ROI_HEIGHT_RATIO = 26.0 / REFERENCE_CARD_HEIGHT
 PRINT_BOTTOM_PADDING_RATIO = 26.0 / REFERENCE_CARD_HEIGHT
-PRINT_Y_RATIOS = (0.58, 0.62, 0.66, 0.70, 0.74)
 
 
 def _ensure_ocr_available():
@@ -136,19 +135,17 @@ def extract_cards_from_drop(
     if card_count <= 0:
         return []
 
-    # Decode image (grayscale)
+    # Decode image (keep original color)
     np_arr = np.frombuffer(image_bytes, dtype=np.uint8)
-    image = cv2.imdecode(np_arr, cv2.IMREAD_GRAYSCALE)
+    image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
     if image is None:
         raise RuntimeError("Failed to decode image bytes with OpenCV")
 
-    # Binarize using OTSU
-    _, thresh = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-    thresh_slices = slice_drop_image(thresh, card_count)
+    # No preprocessing - use original image
+    image_slices = slice_drop_image(image, card_count)
 
     cards: List[Dict[str, Any]] = []
-    for idx, card_slice in enumerate(thresh_slices):
+    for idx, card_slice in enumerate(image_slices):
         cards.append(extract_card(card_slice, idx))
 
     return cards
@@ -217,26 +214,17 @@ def extract_print_edition(card_image: "np.ndarray", index: int) -> Dict[str, Any
         return {"index": index, "print_number": None, "edition": None, "raw": ""}
 
     candidate_y = []
-    seen = set()
     roi_height = max(1, int(round(PRINT_ROI_HEIGHT_RATIO * height)))
     roi_width = max(1, int(round(PRINT_ROI_WIDTH_RATIO * width)))
-    for ratio in PRINT_Y_RATIOS:
-        cy = int(round(height * ratio))
-        if cy + roi_height < height and cy not in seen:
-            candidate_y.append(cy)
-            seen.add(cy)
 
     bottom_candidate = (
         height - roi_height - int(round(PRINT_BOTTOM_PADDING_RATIO * height))
     )
     bottom_candidate = max(0, bottom_candidate)
-    if bottom_candidate not in seen and bottom_candidate + roi_height <= height:
+    if bottom_candidate + roi_height <= height:
         candidate_y.append(bottom_candidate)
-        seen.add(bottom_candidate)
 
-    final_candidate = max(0, height - roi_height)
-    if final_candidate not in seen:
-        candidate_y.append(final_candidate)
+    logger.info(f"Card {index} OCR candidates: {candidate_y}")
 
     raw_capture = None
     found = None
@@ -245,13 +233,8 @@ def extract_print_edition(card_image: "np.ndarray", index: int) -> Dict[str, Any
         roi = card_image[y : y + roi_height, roi_x_start:width]
         if roi.size == 0:
             continue
-        _, bin_roi = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        # Save ROI for debugging
-        filename = f"roi_card{index}_y{y}_x{roi_x_start}.png"
-        filepath = os.path.join("./temp", filename)
-        cv2.imwrite(filepath, bin_roi)
         txt = pytesseract.image_to_string(
-            bin_roi,
+            roi,
             lang="eng",
             config="--psm 6 -c tessedit_char_whitelist=0123456789·.:•-",
         )
@@ -305,7 +288,7 @@ def extract_print_edition_from_drop(
         return []
 
     np_arr = np.frombuffer(image_bytes, dtype=np.uint8)
-    image = cv2.imdecode(np_arr, cv2.IMREAD_GRAYSCALE)
+    image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
     if image is None:
         raise RuntimeError("Failed to decode image bytes with OpenCV")
 
