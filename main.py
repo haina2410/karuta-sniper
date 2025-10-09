@@ -1,4 +1,5 @@
 import random
+import re
 from time import time
 import discord
 from dotenv import load_dotenv
@@ -209,12 +210,11 @@ class MyClient(discord.Client):
                 )
         except Exception:
             logger.debug("Failed to compute message processing latency", exc_info=True)
-
-        if "is dropping" in message.content and "cards" in message.content:
+        
+        match = re.search(r"dropping (\d+) cards", message.content)
+        if match:
             # Attempt to parse number of cards
-            import re
-
-            match = re.search(r"dropping (\d+) cards", message.content)
+            card_count = int(match.group(1))
             card_count = int(match.group(1)) if match else 3
 
             # Defer OCR start: only schedule reaction sequence (which will OCR within its wait window)
