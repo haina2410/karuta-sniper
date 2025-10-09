@@ -210,7 +210,7 @@ class MyClient(discord.Client):
         except Exception:
             logger.debug("Failed to compute message processing latency", exc_info=True)
 
-        if "dropping" in message.content and "cards" in message.content:
+        if "is dropping" in message.content and "cards" in message.content:
             # Attempt to parse number of cards
             import re
 
@@ -281,9 +281,19 @@ class MyClient(discord.Client):
                             emoji_map = ["1️⃣", "2️⃣", "3️⃣"]
                             if 0 <= idx < len(emoji_map):
                                 chosen_emoji = emoji_map[idx]
+                                # Report print numbers for all cards before making choice
+                                report_lines = []
+                                for i, c in enumerate(pe):
+                                    emoji = emoji_map[i] if i < 3 else f"#{i+1}"
+                                    if c.get("print_number") is not None:
+                                        report_lines.append(f"{emoji}: Bản in #{c['print_number']}, phiên bản {c['edition']}")
+                                    else:
+                                        report_lines.append(f"{emoji}: Không đọc được :sadcat:")
+
                                 m = f"Chọn card {chosen_emoji} với bản in {target['print_number']}, edition {target['edition']}"
+                                report_msg = "\n".join(report_lines)
                                 logger.info(m)
-                                asyncio.create_task(message.channel.send(m))
+                                asyncio.create_task(message.channel.send(report_msg + "\n\n" + m))
                         else:
                             raise ValueError("No valid print numbers found")
                     except Exception:
