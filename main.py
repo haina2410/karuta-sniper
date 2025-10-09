@@ -281,7 +281,7 @@ class MyClient(discord.Client):
                             emoji_map = ["1️⃣", "2️⃣", "3️⃣"]
                             if 0 <= idx < len(emoji_map):
                                 chosen_emoji = emoji_map[idx]
-                                m = f"Rarity selection: chose index {idx + 1} with print {target['print_number']} edition {target['edition']} (precomputed during wait)"
+                                m = f"Chọn card {chosen_emoji} với bản in {target['print_number']}, edition {target['edition']}"
                                 logger.info(m)
                                 asyncio.create_task(message.channel.send(m))
                         else:
