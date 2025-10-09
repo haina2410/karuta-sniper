@@ -151,6 +151,61 @@ def extract_cards_from_drop(
     return cards
 
 
+def _preprocess_roi_for_ocr(roi: "np.ndarray", source_dpi: int = 72, target_dpi: int = 300) -> "np.ndarray":
+    """Preprocess ROI to improve OCR accuracy.
+    
+    Steps:
+    1. Convert to grayscale
+    2. Scale from source DPI (typically 72) to target DPI (300 minimum for OCR)
+    3. Apply Otsu's thresholding to handle varying lighting
+    4. Denoise to remove artifacts
+    5. Unsharp masking to enhance text edges
+    
+    Args:
+        roi: Input region of interest (BGR or grayscale)
+        source_dpi: DPI of source image (default 72, common for web images)
+        target_dpi: Target DPI for OCR (default 300, minimum recommended)
+        
+    Returns:
+        Preprocessed image optimized for OCR
+    """
+    if roi.size == 0:
+        return roi
+        
+    # Convert to grayscale if needed
+    if len(roi.shape) == 3:
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = roi.copy()
+    
+    # First, scale based on DPI conversion (72 DPI -> 300 DPI = 4.166x scale)
+    dpi_scale_factor = target_dpi / source_dpi
+    
+    # Apply DPI scaling
+    if dpi_scale_factor != 1.0:
+        gray = cv2.resize(gray, None, fx=dpi_scale_factor, fy=dpi_scale_factor, interpolation=cv2.INTER_CUBIC)
+        logger.debug(f"DPI scaling: {source_dpi} -> {target_dpi} DPI (factor: {dpi_scale_factor:.2f}x)")
+    
+    logger.info(f"Total scale factor: {dpi_scale_factor:.2f}x (original: {roi.shape[0]}px -> final: {gray.shape[0]}px)")
+    
+    # Apply Otsu's thresholding for better text contrast
+    # Otsu automatically determines the optimal threshold value
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # Denoise using fastNlMeansDenoising (removes small artifacts)
+    denoised = cv2.fastNlMeansDenoising(binary, h=10)
+    
+    # Apply unsharp masking to enhance text edges
+    # Create a blurred version and subtract it from the original (weighted)
+    gaussian_blur = cv2.GaussianBlur(denoised, (0, 0), 2.0)
+    sharpened = cv2.addWeighted(denoised, 1.5, gaussian_blur, -0.5, 0)
+    
+    # Ensure pixel values are in valid range [0, 255]
+    sharpened = np.clip(sharpened, 0, 255).astype(np.uint8)
+
+    return sharpened
+
+
 def _clean_ocr_text(s: str) -> str:
     # Normalize whitespace and strip non-letter except space
     s = s.replace("\n", " ")
@@ -185,7 +240,9 @@ def extract_card(card_image: "np.ndarray", index: int) -> Dict[str, Any]:
         clean_name = ""
     else:
         name_roi = card_image[name_y:name_y_end, 0:name_width]
-        raw_name = pytesseract.image_to_string(name_roi, lang="eng", config="--psm 6")
+        # Preprocess ROI before OCR
+        preprocessed_name_roi = _preprocess_roi_for_ocr(name_roi)
+        raw_name = pytesseract.image_to_string(preprocessed_name_roi, lang="eng", config="--psm 6")
         clean_name = _clean_ocr_text(raw_name)
 
     if name_width <= 0 or series_y >= series_y_end:
@@ -193,8 +250,10 @@ def extract_card(card_image: "np.ndarray", index: int) -> Dict[str, Any]:
         clean_series = ""
     else:
         series_roi = card_image[series_y:series_y_end, 0:name_width]
+        # Preprocess ROI before OCR
+        preprocessed_series_roi = _preprocess_roi_for_ocr(series_roi)
         raw_series = pytesseract.image_to_string(
-            series_roi, lang="eng", config="--psm 6"
+            preprocessed_series_roi, lang="eng", config="--psm 6"
         )
         clean_series = _clean_ocr_text(raw_series)
 
@@ -233,8 +292,12 @@ def extract_print_edition(card_image: "np.ndarray", index: int) -> Dict[str, Any
         roi = card_image[y : y + roi_height, roi_x_start:width]
         if roi.size == 0:
             continue
+
+        # Preprocess ROI before OCR
+        preprocessed_roi = _preprocess_roi_for_ocr(roi)
+
         txt = pytesseract.image_to_string(
-            roi,
+            preprocessed_roi,
             lang="eng",
             config="--psm 6 -c tessedit_char_whitelist=0123456789·.:•-",
         )
