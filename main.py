@@ -10,10 +10,9 @@ from utils import auto_message_task, handle_reaction
 from datetime import datetime, timezone
 from typing import Optional
 
-from ocr_utils import (
+from ocr_openai import (
     ocr_cards,
     ocr_prints,
-    fetch_image,
 )  # type: ignore
 
 load_dotenv()
@@ -98,10 +97,9 @@ class MyClient(discord.Client):
                 return
             start = time()
             try:
-                # Fetch image once then run card + print OCR concurrently (avoid double download)
-                image_bytes = await fetch_image(url)
-                cards_task = asyncio.create_task(ocr_cards(image_bytes, count))
-                prints_task = asyncio.create_task(ocr_prints(image_bytes, count))
+                # Run card + print OCR concurrently (avoid double download)
+                cards_task = asyncio.create_task(ocr_cards(url, count))
+                prints_task = asyncio.create_task(ocr_prints(url, count))
                 cards, prints = await asyncio.gather(
                     cards_task, prints_task, return_exceptions=True
                 )
@@ -158,8 +156,7 @@ class MyClient(discord.Client):
                 return
             start = time()
             try:
-                img_bytes = await fetch_image(url)
-                pe = await ocr_prints(img_bytes, count)
+                pe = await ocr_prints(url, count)
                 self.ocr_uses += 1
                 self.last_ocr_duration = time() - start
                 lines = [
@@ -194,7 +191,6 @@ class MyClient(discord.Client):
             asyncio.create_task(_echo())
             return
 
-
         # Only respond to messages from Karuta bot
         if message.author.id != KARUTA_ID:
             return
@@ -210,7 +206,7 @@ class MyClient(discord.Client):
                 )
         except Exception:
             logger.debug("Failed to compute message processing latency", exc_info=True)
-        
+
         match = re.search(r"dropping (\d+) cards", message.content)
         if match:
             # Attempt to parse number of cards
@@ -261,8 +257,7 @@ class MyClient(discord.Client):
                     try:
                         attachment = message.attachments[0]
                         # Fetch once then process in background
-                        img_bytes = await fetch_image(attachment.url)
-                        ocr_task = asyncio.create_task(ocr_prints(img_bytes, 3))
+                        ocr_task = asyncio.create_task(ocr_prints(attachment.url, 3))
                     except Exception:
                         logger.exception("Failed to start OCR task for prints")
 
@@ -284,16 +279,22 @@ class MyClient(discord.Client):
                                 # Report print numbers for all cards before making choice
                                 report_lines = []
                                 for i, c in enumerate(pe):
-                                    emoji = emoji_map[i] if i < 3 else f"#{i+1}"
+                                    emoji = emoji_map[i] if i < 3 else f"#{i + 1}"
                                     if c.get("print_number") is not None:
-                                        report_lines.append(f"{emoji}: Bản in #{c['print_number']}, phiên bản {c['edition']}")
+                                        report_lines.append(
+                                            f"{emoji}: Bản in #{c['print_number']}, phiên bản {c['edition']}"
+                                        )
                                     else:
-                                        report_lines.append(f"{emoji}: Không đọc được :sadcat:")
+                                        report_lines.append(
+                                            f"{emoji}: Không đọc được :sadcat:"
+                                        )
 
                                 m = f"Chọn card {chosen_emoji} với bản in {target['print_number']}, edition {target['edition']}"
                                 report_msg = "\n".join(report_lines)
                                 logger.info(m)
-                                asyncio.create_task(message.channel.send(report_msg + "\n\n" + m))
+                                asyncio.create_task(
+                                    message.channel.send(report_msg + "\n\n" + m)
+                                )
                         else:
                             raise ValueError("No valid print numbers found")
                     except Exception:
@@ -346,8 +347,7 @@ class MyClient(discord.Client):
         start = time()
         try:
             # Fetch once then OCR
-            image_bytes = await fetch_image(url)
-            cards = await ocr_cards(image_bytes, card_count)
+            cards = await ocr_cards(url, card_count)
             self.ocr_uses += 1
             self.last_ocr_duration = time() - start
             if cards:
