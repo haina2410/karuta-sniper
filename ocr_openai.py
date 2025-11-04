@@ -152,12 +152,7 @@ async def ocr_cards(image_url: str, card_count: int) -> List[Dict[str, Any]]:
         "You are analysing a Karuta card drop screenshot. "
         f"There are exactly {card_count} cards arranged from left to right. "
         "For each card, read the SERIES (upper text) and NAME (lower text). "
-        "Return ONLY valid JSON with the following structure:\n"
-        "{\n"
-        '  "cards": [\n'
-        '    {"index": 1, "series": "...", "name": "...", "raw_series": "...", "raw_name": "..."}\n'
-        "  ]\n"
-        "}\n"
+        "Return ONLY valid JSON. "
         "Rules:\n"
         "- index starts at 1 for the left-most card.\n"
         "- raw_* fields must contain the literal text you read, even if it looks incorrect.\n"
@@ -202,13 +197,7 @@ async def ocr_prints(image_url: str, card_count: int) -> List[Dict[str, Any]]:
         f"There are exactly {card_count} cards arranged left to right. "
         "For each card return its print number (digits before the separator) and edition (digits after). "
         "Also decide which card has the lowest print number; break ties by the lowest edition, then by left-most position. "
-        "Return ONLY JSON with structure:\n"
-        "{\n"
-        '  "prints": [\n'
-        '    {"index": 1, "print_number": 123, "edition": 4, "raw": "123·4"}\n'
-        "  ],\n"
-        '  "lowest_print_index": 1\n'
-        "}\n"
+        "Return ONLY JSON. "
         "Rules:\n"
         "- index starts at 1 for the left-most card.\n"
         "- If edition is missing, use null.\n"
